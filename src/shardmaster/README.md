@@ -1,3 +1,14 @@
+- [ShardMaster](#ShardMaster)
+- [架构分析](#1-架构分析)
+- [关键函数分析](#2-关键函数分析)
+- [关键操作流程分析](#3-关键操作流程)
+
+
+本项目参考了 [OneSizeFitsQuorum/MIT6.824-2021](https://github.com/OneSizeFitsQuorum/MIT6.824-2021/tree/master#) 仓库的实现。
+
+
+
+
 # ShardMaster
 
 ## 1. 架构分析
