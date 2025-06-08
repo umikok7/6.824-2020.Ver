@@ -4,7 +4,7 @@
 - [关键操作流程分析](#3-关键操作流程)
 
 
-本项目参考了 [OneSizeFitsQuorum/MIT6.824-2021](https://github.com/OneSizeFitsQuorum/MIT6.824-2021/tree/master#) 仓库的实现。
+本项目参考了 [博客](https://blog.csdn.net/qq_43460956/article/details/134885751) 的实现。
 
 
 
@@ -170,81 +170,81 @@ newGroups := deepCopyGroups(lastConfig.Groups)
 
 1. 客户端发起Join请求
 
-```go
-ok := srv.Call("ShardMaster.Join", args, &reply)
-```
+	```go
+	ok := srv.Call("ShardMaster.Join", args, &reply)
+	```
 
 2. ShardMaster接收并处理RPC(以下实现均在`Join`中)
-- 过滤重复的请求 
-```go
-// shardmaster过滤重复的请求
-	if args.SeqNum < sm.sessions[args.ClientId].LastSeqNum {
-		// 标志该请求client已经收到正确的回复了，只是这个重发请求到shardmaster太晚
-		sm.mu.Unlock()
-		return
-	} else if args.SeqNum == sm.sessions[args.ClientId].LastSeqNum {
-		// 可将session记录的之前执行过该请求的结果直接返回，避免一个op执行多次
-		reply.Err = sm.sessions[args.ClientId].Response.Err
-		sm.mu.Unlock()
-		return
+	- 过滤重复的请求 
+	```go
+	// shardmaster过滤重复的请求
+		if args.SeqNum < sm.sessions[args.ClientId].LastSeqNum {
+			// 标志该请求client已经收到正确的回复了，只是这个重发请求到shardmaster太晚
+			sm.mu.Unlock()
+			return
+		} else if args.SeqNum == sm.sessions[args.ClientId].LastSeqNum {
+			// 可将session记录的之前执行过该请求的结果直接返回，避免一个op执行多次
+			reply.Err = sm.sessions[args.ClientId].Response.Err
+			sm.mu.Unlock()
+			return
+		}
+	```
+
+	- 构造Op对象，提交给Raft层
+	```go
+	index, _, isLeader := sm.rf.Start(joinOp) // 将Join操作传给Raft层进行共识
+	```
+
+	- 等待执行的结果
+	```go
+		// 创建通知通道，等待操作执行完成
+		notifyCh := sm.createNotifyCh(index)
+
+		select {
+		case res := <-notifyCh:
+			reply.Err = res.Err
+		case <-time.After(RespondTimeout * time.Millisecond):
+			reply.Err = ErrTimeout
+		}
+
+		go sm.closeNotifyCh(index)  // 异步清理通道，避免死锁
+	```
+
+3. Apply层执行操作
+
+	- Raft达成共识，通过applyCh通知
+	```go
+	func (sm *ShardMaster) applyConfigChange() {
+		for !sm.killed() {
+			applyMsg := <-sm.applyCh  // 从 Raft 接收已提交的操作
+			...
+	```
+
+
+4. 具体的Join操作：`executeJoin`
+	- 添加新组
+	- 负载均衡
+
+5. 保存session，通知客户端
+	具体实现都在`applyConfigChange`中
+	```go
+	// 将最近执行的Query指令外的指令执行结果放在session中以便以后重复请求，可以直接返回，目的还是为了避免重复执行
+	if op.OpType != Query {
+		session := Session{
+			LastSeqNum: op.SeqNum,
+			Optype:     op.OpType,
+			Response:   reply,
+		}
+		sm.sessions[op.ClientId] = session
+		DPrintf("ShardMaster[%d].session[%d] = %v\n", sm.me, op.ClientId, session)
 	}
-```
+	```
 
-- 构造Op对象，提交给Raft层
-```go
-index, _, isLeader := sm.rf.Start(joinOp) // 将Join操作传给Raft层进行共识
-```
-
-- 等待执行的结果
-```go
-    // 创建通知通道，等待操作执行完成
-    notifyCh := sm.createNotifyCh(index)
-
-    select {
-    case res := <-notifyCh:
-        reply.Err = res.Err
-    case <-time.After(RespondTimeout * time.Millisecond):
-        reply.Err = ErrTimeout
-    }
-
-    go sm.closeNotifyCh(index)  // 异步清理通道，避免死锁
-```
-
-4. Apply层执行操作
-
-- Raft达成共识，通过applyCh通知
-```go
-func (sm *ShardMaster) applyConfigChange() {
-    for !sm.killed() {
-        applyMsg := <-sm.applyCh  // 从 Raft 接收已提交的操作
-		...
-```
-
-
-5. 具体的Join操作：`executeJoin`
-- 添加新组
-- 负载均衡
-
-6. 保存session，通知客户端
-具体实现都在`applyConfigChange`中
-```go
-// 将最近执行的Query指令外的指令执行结果放在session中以便以后重复请求，可以直接返回，目的还是为了避免重复执行
-if op.OpType != Query {
-	session := Session{
-		LastSeqNum: op.SeqNum,
-		Optype:     op.OpType,
-		Response:   reply,
+	```go
+	// 如果任期和leader身份没有变，则向对应client的notifhMapCh发送reply通知对应的handle回复client
+	if _, existCh := sm.notifyMapCh[applyMsg.CommandIndex]; existCh {
+		if currentTerm, isLeader := sm.rf.GetState(); isLeader && applyMsg.CommandTerm == currentTerm {
+			sm.notifyMapCh[applyMsg.CommandIndex] <- reply
+		}
 	}
-	sm.sessions[op.ClientId] = session
-	DPrintf("ShardMaster[%d].session[%d] = %v\n", sm.me, op.ClientId, session)
-}
-```
-
-```go
-// 如果任期和leader身份没有变，则向对应client的notifhMapCh发送reply通知对应的handle回复client
-if _, existCh := sm.notifyMapCh[applyMsg.CommandIndex]; existCh {
-	if currentTerm, isLeader := sm.rf.GetState(); isLeader && applyMsg.CommandTerm == currentTerm {
-		sm.notifyMapCh[applyMsg.CommandIndex] <- reply
-	}
-}
-```
+	```

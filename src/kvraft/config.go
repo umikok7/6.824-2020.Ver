@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"../raft-LabD"
+	"../raft-Lab2D"
 )
 
 func randstring(n int) string {

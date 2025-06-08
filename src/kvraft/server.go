@@ -10,7 +10,7 @@ import (
 
 	"../labgob"
 	"../labrpc"
-	"../raft-LabD"
+	"../raft-Lab2D"
 )
 
 const Debug = 0

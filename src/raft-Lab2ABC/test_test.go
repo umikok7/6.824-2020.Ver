@@ -8,23 +8,21 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
-const RaftElectionTimeout = 1000 * time.Millisecond // Millisecond毫秒
+const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
-
-	////让pprof服务运行起来
-	//go StartHttpDebugger()
-
-	servers := 3 // Raft server的数量？
+	servers := 3
 	cfg := make_config(t, servers, false)
 	defer cfg.cleanup()
 
@@ -64,17 +62,16 @@ func TestReElection2A(t *testing.T) {
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
-	cfg.disconnect(leader1) // 让原来的leader失联
-	cfg.checkOneLeader()    // 检查是否产生了新的唯一的leader
+	cfg.disconnect(leader1)
+	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
-	cfg.connect(leader1) // 老leader重新加入集群不应该影响新leader（因为它的term已经没有新leader大了）
+	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
-	// 将新leader和另一个server都失联，则不满足大多数机器仍正常运转的条件，raft集群无法正确工作，因此应该没有leader
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
@@ -106,11 +103,11 @@ func TestBasicAgree2B(t *testing.T) {
 		}
 
 		xindex := cfg.one(index*100, servers, false)
-
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
 	}
+
 	cfg.end()
 }
 
@@ -190,7 +187,7 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	cfg.one(10, servers, false)
 
-	// 3 of 5 followers disconnect，即集群中大多数servers失联（leader没失联）
+	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)

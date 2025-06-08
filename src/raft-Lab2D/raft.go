@@ -50,6 +50,8 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	// 应用层
+	CommandTerm int // 添加这个字段，用于 kvserver 的 handler 比较
 
 	// for 2D
 	SnapshotValid bool   // 表示Snapshot字段是否包含一个快照
@@ -86,6 +88,10 @@ type Raft struct {
 	nextIndex   []int         // 针对每个服务器，记录下一个将发送给服务器的日志条目索引（初始化为领导者最后日志索引+1）
 	matchIndex  []int         // 针对每个服务器，记录已知在该服务器上复制的最高日志条目索引（初始化为0，单调增）
 	applyChan   chan ApplyMsg // 用于提交给客户端已经完成超过半数服务器复制成功的log处理结果
+
+	// 应用层
+	passiveSnapshotting bool // 该raft server正在进行被动快照的标志
+	activeSnapshotting  bool // 该raft server正在进行主动快照的标志
 
 }
 
@@ -137,7 +143,8 @@ type InstallSnapshotArgs struct {
 // 定义了follower对快照安装请求的响应结构
 type InstallSnapshotReply struct {
 	// Term 是当前follower的任期，leader接收到此响应后会检查该任期，以确认自己是否依旧是leader
-	Term int
+	Term   int
+	Accept bool // follower是否接收这个快照
 }
 
 // applyLog 方法负责将已知提交的日志条目应用到状态机中。
@@ -170,6 +177,7 @@ func (rf *Raft) applyLog() {
 			CommandValid: true,
 			Command:      logEntity.Command, //新提交的日志条目
 			CommandIndex: logEntity.Index,   // 新提交的日志条目索引
+			CommandTerm:  logEntity.Term,
 		}
 	}
 
@@ -341,6 +349,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	rf.trimIndex(index) // 修剪日志
 	// 保存状态和日志
 	w := new(bytes.Buffer)
@@ -647,6 +656,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(peers))
 	rf.applyChan = applyCh
 
+	// 应用层
+	rf.passiveSnapshotting = false
+	rf.activeSnapshotting = false
+
 	// initialize from state persisted before a crash
 	// 从崩溃前保存的状态进行持久化
 	rf.readPersist(persister.ReadRaftState())
@@ -932,7 +945,6 @@ func (rf *Raft) AppendEntriesHandler(args *AppendEntriesArgs, reply *AppendEntri
 	/*
 		检查前一条日志的任期是否匹配
 	*/
-	// lastLog := rf.logs[args.PrevLogIdx-snapLastIndex] // 减去快照的索引偏移量
 	lastLog := rf.logs[logIndex]
 	if args.PrevLogTerm != lastLog.Term {
 		// 设置冲突任期号为跟随者日志中最后一条条目的任期号，
@@ -1043,17 +1055,34 @@ func (rf *Raft) SendInstallSnapshotRpc(id int, args *InstallSnapshotArgs, reply 
 // 当一个节点接收到其他节点发送的快照时，此方法会被调用以更新其状态。
 // rf->follower, args->leader
 // 参数:
-//
-//	args - 安装快照请求的参数，包含快照数据、快照的最后包含的索引和任期等信息。
-//	reply - 安装快照请求的回复，用于向发送方反馈处理结果。
+// args - 安装快照请求的参数，包含快照数据、快照的最后包含的索引和任期等信息。
+// reply - 安装快照请求的回复，用于向发送方反馈处理结果。
 func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Term = rf.currentTerm
+
+	// // 暂时禁用快照安装进行测试
+	// DPrintf("Server %d: snapshot installation disabled for debugging", rf.me)
+	// reply.Accept = false
+	// return
+
 	// 如果当前节点的任期大于请求的任期，则忽略请求
 	if rf.currentTerm > args.Term {
+		reply.Accept = false
+		reply.Term = rf.currentTerm
 		return
 	}
+
+	// 应用层
+	// 先检查是否需正在进行主动快照
+	// 若是本次被动快照取消，避免主、被动快照重叠应用导致上层kvserver状态与下层raft日志不一致
+	if rf.activeSnapshotting {
+		reply.Term = rf.currentTerm
+		reply.Accept = false
+		return // 不需要被动快照
+	}
+
 	if rf.currentTerm < args.Term || (rf.currentTerm == args.Term && rf.role == Candidate) {
 		// 如果当前节点的任期小于请求的任期，或者任期相等（收到了leader的请求）则转换为追随者
 		rf.ConvertToFollowerNoLock(args.Term)
@@ -1067,9 +1096,18 @@ func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *Install
 	// 如果请求中的快照最后包含的索引小于等于当前节点的已提交索引，则无需处理
 	// 也就是说快照不比当前状态新，那就忽略
 	if args.LastIncludedIndex <= rf.commitIndex {
+		reply.Accept = false
 		return
 	}
 
+	// 发送心跳确认
+	rf.appendEntriesChan <- AppendEntriesReply{
+		Term:    rf.currentTerm,
+		Success: true,
+	}
+
+	// 设置被动快照标志
+	rf.passiveSnapshotting = true
 	// 全盘接收快照文件
 	// 更新节点的commitIndex和lastApplied
 	rf.commitIndex = args.LastIncludedIndex
@@ -1101,15 +1139,26 @@ func (rf *Raft) InstallSnapshotHandler(args *InstallSnapshotArgs, reply *Install
 	}
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, args.Data)
-	// 异步发送ApplyMsg，通知应用层处理快照
-	go func() {
-		rf.applyChan <- ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      args.Data,
-			SnapshotTerm:  args.LastIncludedTerm,
-			SnapshotIndex: args.LastIncludedIndex,
-		}
-	}()
+	// // 异步发送ApplyMsg，通知应用层处理快照
+	// go func() {
+	// 	rf.applyChan <- ApplyMsg{
+	// 		SnapshotValid: true,
+	// 		Snapshot:      args.Data,
+	// 		SnapshotTerm:  args.LastIncludedTerm,
+	// 		SnapshotIndex: args.LastIncludedIndex,
+	// 	}
+	// }()
+
+	// 同步发送快照到应用层
+	rf.applyChan <- ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+
+	reply.Accept = true
+
 }
 
 // 该函数在转换过程中会更新节点的状态，包括角色、任期、投票信息
@@ -1175,3 +1224,37 @@ func (rf *Raft) getFirstLog() LogEntries {
 }
 
 func (rf *Raft) getLogLen() int { return rf.getLastLog().Index + 1 }
+
+func (rf *Raft) CheckCurrentTermLog() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	latestLog := rf.logs[len(rf.logs)-1]
+	if rf.currentTerm == latestLog.Term {
+		return true
+	}
+	return false
+}
+
+// 由应用层调用，获取rf.passiveSnapshotting标志，若其为false，则设activeSnapshotting为true
+func (rf *Raft) GetPassiveFlagAndSetActiveFlag() bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if !rf.passiveSnapshotting {
+		rf.activeSnapshotting = true // 没有进行被动快照则进行主动快照
+	}
+	return rf.passiveSnapshotting
+}
+
+// 由应用层调用，修改对应的快照状态
+func (rf *Raft) SetActiveSnapShottingFlag(flag bool) {
+	rf.mu.Lock()
+	rf.activeSnapshotting = flag
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) SetPassiveSnapshottingFlag(flag bool) {
+	rf.mu.Lock()
+	rf.passiveSnapshotting = flag
+	rf.mu.Unlock()
+}

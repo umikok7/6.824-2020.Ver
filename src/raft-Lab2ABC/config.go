@@ -135,7 +135,6 @@ func (cfg *config) crash1(i int) {
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
-// 起一个id为i的raft server
 func (cfg *config) start1(i int) {
 	cfg.crash1(i)
 
@@ -236,7 +235,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	fmt.Printf("connect(%d)\n", i)
+	// fmt.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
 
@@ -259,7 +258,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	fmt.Printf("disconnect(%d)\n", i)
+	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
 
@@ -305,9 +304,9 @@ func (cfg *config) setlongreordering(longrel bool) {
 func (cfg *config) checkOneLeader() int {
 	for iters := 0; iters < 10; iters++ {
 		ms := 450 + (rand.Int63() % 100)
-		time.Sleep(time.Duration(ms) * time.Millisecond) // Duration类型代表两个时间点之间经过的时间
+		time.Sleep(time.Duration(ms) * time.Millisecond)
 
-		leaders := make(map[int][]int) // term -> 该term内的leader id切片
+		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
 				if term, leader := cfg.rafts[i].GetState(); leader {
@@ -327,7 +326,7 @@ func (cfg *config) checkOneLeader() int {
 		}
 
 		if len(leaders) != 0 {
-			return leaders[lastTermWithLeader][0] // 返回上一个有leader的term的leaderId
+			return leaders[lastTermWithLeader][0]
 		}
 	}
 	cfg.t.Fatalf("expected one leader, got none")
@@ -363,17 +362,16 @@ func (cfg *config) checkNoLeader() {
 }
 
 // how many servers think a log entry is committed?
-// 认为一个日志条目被提交的server数量
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
 	var cmd interface{} = nil
-	for i := 0; i < len(cfg.rafts); i++ { // 遍历每个server
-		if cfg.applyErr[i] != "" { // 如果应用不成功（错误信息不为空）
+	for i := 0; i < len(cfg.rafts); i++ {
+		if cfg.applyErr[i] != "" {
 			cfg.t.Fatal(cfg.applyErr[i])
 		}
 
 		cfg.mu.Lock()
-		cmd1, ok := cfg.logs[i][index] // server i中提交的索引为index的日志
+		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
 
 		if ok {
@@ -447,32 +445,32 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			cfg.mu.Unlock()
 			if rf != nil {
 				index1, _, ok := rf.Start(cmd)
-				if ok { // 若找的是leader
-					index = index1 // 取出command在日志中的index
+				if ok {
+					index = index1
 					break
 				}
 			}
 		}
 
-		if index != -1 { // 若找到了leader，成功给leader发送了command
+		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
-				nd, cmd1 := cfg.nCommitted(index)    // cmd1有nd个server提交了
-				if nd > 0 && nd >= expectedServers { // 有预期那么多server提交了
+				nd, cmd1 := cfg.nCommitted(index)
+				if nd > 0 && nd >= expectedServers {
 					// committed
-					if cmd1 == cmd { // nd个server提交的的cmd1跟之前client传给leader的cmd相同
+					if cmd1 == cmd {
 						// and it was the command we submitted.
 						return index
 					}
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			if retry == false { // 没有达成共识
+			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
-		} else { // 等待50ms后再次尝试
+		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
